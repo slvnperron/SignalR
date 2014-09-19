@@ -1,12 +1,13 @@
-﻿
-using System.IO;
-using System.Text;
+﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+extern alias StoreClient;
+
 using Microsoft.AspNet.SignalR.Client.Transports;
 using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
+using StoreClientResources = StoreClient::Microsoft.AspNet.SignalR.Client.Resources;
 
 namespace Microsoft.AspNet.SignalR.Client.Store.Tests
 {
@@ -104,11 +105,16 @@ namespace Microsoft.AspNet.SignalR.Client.Store.Tests
             Assert.Equal(
                 new[]
                 {
-                    new KeyValuePair<ConnectionState, ConnectionState>(ConnectionState.Disconnected, ConnectionState.Connecting),
-                    new KeyValuePair<ConnectionState, ConnectionState>(ConnectionState.Connecting, ConnectionState.Connected),
-                    new KeyValuePair<ConnectionState, ConnectionState>(ConnectionState.Connected, ConnectionState.Reconnecting),
-                    new KeyValuePair<ConnectionState, ConnectionState>(ConnectionState.Reconnecting, ConnectionState.Connected),
-                    new KeyValuePair<ConnectionState, ConnectionState>(ConnectionState.Connected, ConnectionState.Disconnected),
+                    new KeyValuePair<ConnectionState, ConnectionState>(ConnectionState.Disconnected,
+                        ConnectionState.Connecting),
+                    new KeyValuePair<ConnectionState, ConnectionState>(ConnectionState.Connecting,
+                        ConnectionState.Connected),
+                    new KeyValuePair<ConnectionState, ConnectionState>(ConnectionState.Connected,
+                        ConnectionState.Reconnecting),
+                    new KeyValuePair<ConnectionState, ConnectionState>(ConnectionState.Reconnecting,
+                        ConnectionState.Connected),
+                    new KeyValuePair<ConnectionState, ConnectionState>(ConnectionState.Connected,
+                        ConnectionState.Disconnected),
                 },
                 stateChanges);
         }
@@ -163,6 +169,52 @@ namespace Microsoft.AspNet.SignalR.Client.Store.Tests
 
                 Assert.True(await Task.Run(() => messageReceivedWh.Wait(5000)));
                 Assert.Equal("MyMessage", receivedMessage);
+            }
+        }
+
+        // [Fact] - temporarily disabled due to AccessViolationException when running with msbuild
+        // Opened a bug against xUnit https://github.com/xunit/xunit/issues/190
+        public async Task SendingMessageWhenTransportIsReconnectingThrows()
+        {
+            using (var hubConnection = new HubConnection(HubUrl))
+            {
+                var reconnectingWh = new ManualResetEventSlim();
+
+                Task sendTask = null;
+                hubConnection.Reconnecting += () =>
+                {
+                    sendTask = hubConnection.Send("data");
+                    reconnectingWh.Set();
+                };
+
+                Exception reportedException = null;
+                hubConnection.Error += e => reportedException = e;
+
+                var reconnectedWh = new ManualResetEventSlim();
+                hubConnection.Reconnected += reconnectedWh.Set;
+
+                var proxy = hubConnection.CreateHubProxy("StoreWebSocketTestHub");
+                await hubConnection.Start(new WebSocketTransport {ReconnectDelay = new TimeSpan(0, 0, 0, 500)});
+
+                try
+                {
+                    await proxy.Invoke("ForceReconnect");
+                }
+                catch (InvalidOperationException)
+                {
+                }
+
+                Assert.True(await Task.Run(() => reconnectingWh.Wait(5000)));
+                Assert.NotNull(sendTask);
+                Assert.True(sendTask.IsFaulted);
+
+                var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () => await sendTask);
+
+                Assert.Equal(
+                    StoreClientResources.GetResourceString("Error_DataCannotBeSentDuringWebSocketReconnect"),
+                    exception.Message);
+
+                Assert.Same(exception, reportedException);
             }
         }
     }
